@@ -1,0 +1,85 @@
+# Базовые настройки для API (FastAPI)
+x-api-common: &api-common
+  image: distributed_app:latest
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+
+# Базовые настройки для базы данных (PostgreSQL)
+x-db-common: &db-common
+  image: postgres:15-alpine
+  restart: unless-stopped
+  environment:
+    POSTGRES_USER: admin
+    POSTGRES_PASSWORD: secretpassword
+    POSTGRES_DB: node_db
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U admin -d node_db"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+
+services:
+  # ================= УЗЕЛ 1 =================
+  db1:
+    <<: *db-common
+    volumes:
+      - db1_data:/var/lib/postgresql/data # Собственный persistent volume для узла 1
+
+  api1:
+    <<: *api-common
+    build: ./app
+    environment:
+      - NODE_ID=1
+      - DB_HOST=db1
+      - PEERS=api2:8000,api3:8000 # Соседи для синхронизации
+    ports:
+      - "8001:8000"
+    depends_on:
+      db1:
+        condition: service_healthy
+
+  # ================= УЗЕЛ 2 =================
+  db2:
+    <<: *db-common
+    volumes:
+      - db2_data:/var/lib/postgresql/data # Собственный persistent volume для узла 2
+
+  api2:
+    <<: *api-common
+    environment:
+      - NODE_ID=2
+      - DB_HOST=db2
+      - PEERS=api1:8000,api3:8000
+    ports:
+      - "8002:8000"
+    depends_on:
+      db2:
+        condition: service_healthy
+
+  # ================= УЗЕЛ 3 =================
+  db3:
+    <<: *db-common
+    volumes:
+      - db3_data:/var/lib/postgresql/data # Собственный persistent volume для узла 3
+
+  api3:
+    <<: *api-common
+    environment:
+      - NODE_ID=3
+      - DB_HOST=db3
+      - PEERS=api1:8000,api2:8000
+    ports:
+      - "8003:8000"
+    depends_on:
+      db3:
+        condition: service_healthy
+
+# Объявление томов для сохранения данных после рестарта
+volumes:
+  db1_data:
+  db2_data:
+  db3_data:
