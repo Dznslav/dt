@@ -1,0 +1,33 @@
+# Presuňte tento súbor do .github/workflows/ci.yml (GitHub Actions)
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q tests
+
+  e2e-defense-scenario:
+    # Celý scenár obhajoby nad reálnymi kontajnermi (3x API + 3x PostgreSQL)
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build & start cluster
+        run: docker compose up -d --build --wait
+      - name: Defense scenario (docker network disconnect)
+        run: python3 scripts/demo_scenario.py --mode docker
+      - name: Logs
+        if: always()
+        run: docker compose logs --no-color | tail -n 300
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

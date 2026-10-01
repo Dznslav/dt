@@ -1,25 +1,46 @@
-import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+import logging
+import time
 
-# Получаем адрес БД из переменных окружения (или используем localhost для тестов)
-DB_HOST = os.getenv("DB_HOST", "localhost")
-# Данные для входа совпадают с теми, что мы указали в docker-compose.yml
-DATABASE_URL = f"postgresql://admin:secretpassword@{DB_HOST}:5432/node_db"
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-# Создаем движок SQLAlchemy
-engine = create_engine(DATABASE_URL)
+import config
 
-# Создаем фабрику сессий для работы с БД
+log = logging.getLogger("node.db")
+
+_connect_args = {"check_same_thread": False} if config.DATABASE_URL.startswith("sqlite") else {}
+
+# pool_pre_ping — kontroluje, či pripojenie k DB je stále platné (dôležité pri reštarte kontajnerov)
+engine = create_engine(config.DATABASE_URL, pool_pre_ping=True, connect_args=_connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Базовый класс для всех моделей
 Base = declarative_base()
 
-# Зависимость для получения сессии БД в эндпоинтах FastAPI
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def wait_for_db(retries: int = 30, delay: float = 2.0) -> None:
+    """Čakáme, kým BD nebude dostupná (dôležité po reštarte kontajnerov)."""
+    for attempt in range(1, retries + 1):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.warning("DB not ready (attempt %s/%s): %s", attempt, retries, exc)
+            time.sleep(delay)
+    raise RuntimeError("Database is not reachable")
+
+
+def db_ok() -> bool:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception:  # noqa: BLE001
+        return False

@@ -1,85 +1,132 @@
-# Базовые настройки для API (FastAPI)
+# Kontajnerizovaný distribuovaný IS – 3 uzly (A, B, C) na jednom Docker hostiteľovi.
+#
+# Každý uzol = API kontajner + vlastný PostgreSQL kontajner + vlastný persistentný volume.
+# Všetky API kontajnery používajú rovnaký obraz dt-node:latest, líšia sa len NODE_ID/PEERS/DB_HOST.
+#
+# Siete:
+#   dt_cluster  – spoločná sieť, cez ktorú sa uzly replikujú (tú pri teste odpájame)
+#   dt_node_x   – privátna sieť uzla: API <-> jeho databáza (databázy nie sú viditeľné pre iné uzly)
+#
+# Spustenie:   docker compose up -d --build --wait
+# Monitoring:  docker compose --profile monitoring up -d   (Dozzle – centralizované logy na :9999)
+
 x-api-common: &api-common
-  image: distributed_app:latest
+  build: ./app
+  image: dt-node:latest
   restart: unless-stopped
+  environment: &api-env
+    POSTGRES_USER: ${POSTGRES_USER:-admin}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
+    POSTGRES_DB: ${POSTGRES_DB:-node_db}
+    CLUSTER_TOKEN: ${CLUSTER_TOKEN:-dev-cluster-token}
+    SYNC_INTERVAL: ${SYNC_INTERVAL:-5}
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
     interval: 10s
     timeout: 5s
+    start_period: 15s
     retries: 3
+  logging: &logging
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
 
-# Базовые настройки для базы данных (PostgreSQL)
 x-db-common: &db-common
   image: postgres:15-alpine
   restart: unless-stopped
   environment:
-    POSTGRES_USER: admin
-    POSTGRES_PASSWORD: secretpassword
-    POSTGRES_DB: node_db
+    POSTGRES_USER: ${POSTGRES_USER:-admin}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
+    POSTGRES_DB: ${POSTGRES_DB:-node_db}
   healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U admin -d node_db"]
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
     interval: 10s
     timeout: 5s
-    retries: 3
+    retries: 5
+  logging: *logging
 
 services:
-  # ================= УЗЕЛ 1 =================
-  db1:
+  # ============================ UZOL A ============================
+  db-a:
     <<: *db-common
-    volumes:
-      - db1_data:/var/lib/postgresql/data # Собственный persistent volume для узла 1
+    container_name: dt-db-a
+    volumes: [db_a_data:/var/lib/postgresql/data]
+    networks: [node_a]
 
-  api1:
+  api-a:
     <<: *api-common
-    build: ./app
+    container_name: dt-api-a
     environment:
-      - NODE_ID=1
-      - DB_HOST=db1
-      - PEERS=api2:8000,api3:8000 # Соседи для синхронизации
-    ports:
-      - "8001:8000"
+      <<: *api-env
+      NODE_ID: A
+      DB_HOST: db-a
+      PEERS: B=http://api-b:8000,C=http://api-c:8000
+    ports: ["8001:8000"]
+    networks: [node_a, cluster]
     depends_on:
-      db1:
-        condition: service_healthy
+      db-a: { condition: service_healthy }
 
-  # ================= УЗЕЛ 2 =================
-  db2:
+  # ============================ UZOL B ============================
+  db-b:
     <<: *db-common
-    volumes:
-      - db2_data:/var/lib/postgresql/data # Собственный persistent volume для узла 2
+    container_name: dt-db-b
+    volumes: [db_b_data:/var/lib/postgresql/data]
+    networks: [node_b]
 
-  api2:
+  api-b:
     <<: *api-common
+    container_name: dt-api-b
     environment:
-      - NODE_ID=2
-      - DB_HOST=db2
-      - PEERS=api1:8000,api3:8000
-    ports:
-      - "8002:8000"
+      <<: *api-env
+      NODE_ID: B
+      DB_HOST: db-b
+      PEERS: A=http://api-a:8000,C=http://api-c:8000
+    ports: ["8002:8000"]
+    networks: [node_b, cluster]
     depends_on:
-      db2:
-        condition: service_healthy
+      db-b: { condition: service_healthy }
 
-  # ================= УЗЕЛ 3 =================
-  db3:
+  # ============================ UZOL C ============================
+  db-c:
     <<: *db-common
-    volumes:
-      - db3_data:/var/lib/postgresql/data # Собственный persistent volume для узла 3
+    container_name: dt-db-c
+    volumes: [db_c_data:/var/lib/postgresql/data]
+    networks: [node_c]
 
-  api3:
+  api-c:
     <<: *api-common
+    container_name: dt-api-c
     environment:
-      - NODE_ID=3
-      - DB_HOST=db3
-      - PEERS=api1:8000,api2:8000
-    ports:
-      - "8003:8000"
+      <<: *api-env
+      NODE_ID: C
+      DB_HOST: db-c
+      PEERS: A=http://api-a:8000,B=http://api-b:8000
+    ports: ["8003:8000"]
+    networks: [node_c, cluster]
     depends_on:
-      db3:
-        condition: service_healthy
+      db-c: { condition: service_healthy }
 
-# Объявление томов для сохранения данных после рестарта
+  # ================= Centralizované logovanie (voliteľné) =================
+  dozzle:
+    image: amir20/dozzle:latest
+    profiles: [monitoring]
+    container_name: dt-dozzle
+    ports: ["9999:8080"]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    environment:
+      DOZZLE_FILTER: "name=dt-"
+
+networks:
+  cluster:
+    name: dt_cluster
+  node_a:
+    name: dt_node_a
+  node_b:
+    name: dt_node_b
+  node_c:
+    name: dt_node_c
+
+# Persistentné volumes – údaje prežijú reštart aj odstránenie kontajnerov
 volumes:
-  db1_data:
-  db2_data:
-  db3_data:
+  db_a_data:
+  db_b_data:
+  db_c_data:

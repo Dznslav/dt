@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stavový panel uzla</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1d2330; --muted:#6b7280; --border:#e3e6eb;
+          --ok:#1a7f45; --okbg:#e3f5ea; --bad:#b42318; --badbg:#fde8e6; --warn:#9a5b00; --warnbg:#fff3dc;
+          --accent:#2f5bd3; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161b; --card:#1d2027; --text:#e6e8ec; --muted:#9aa1ad;
+          --border:#2d313a; --okbg:#173524; --ok:#5fd394; --badbg:#3d1a17; --bad:#ff8a7e; --warnbg:#3a2c10; --warn:#f4c05b; --accent:#7b9cff; } }
+  * { box-sizing:border-box }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text) }
+  header { padding:16px 24px; display:flex; flex-wrap:wrap; gap:12px; align-items:center; border-bottom:1px solid var(--border); background:var(--card) }
+  header h1 { font-size:18px; margin:0 12px 0 0 }
+  main { padding:20px 24px; display:grid; gap:20px; max-width:1300px; margin:0 auto }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; overflow-x:auto }
+  .card h2 { font-size:15px; margin:0 0 12px; display:flex; gap:10px; align-items:center }
+  table { border-collapse:collapse; width:100%; font-size:13px }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top }
+  th { color:var(--muted); font-weight:600 }
+  code, .mono { font-family: ui-monospace, Consolas, monospace; font-size:12px }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600 }
+  .ok { background:var(--okbg); color:var(--ok) } .bad { background:var(--badbg); color:var(--bad) } .warn { background:var(--warnbg); color:var(--warn) }
+  button { font:inherit; padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:var(--card); color:var(--text); cursor:pointer }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent) }
+  button:hover { filter:brightness(0.95) }
+  input, textarea { font:inherit; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text) }
+  form { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px }
+  .muted { color:var(--muted) }
+  #msg { white-space:pre-wrap; font-family:ui-monospace,Consolas,monospace; font-size:12px; max-height:220px; overflow:auto; margin:0 }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:20px }
+  @media (max-width: 900px) { .grid2 { grid-template-columns:1fr } main, header { padding:12px 16px } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Uzol <span id="node">?</span></h1>
+  <span id="nodeStatus" class="pill">…</span>
+  <span id="consistency" class="pill">…</span>
+  <span style="flex:1"></span>
+  <button class="primary" onclick="doSync()">Synchronizovať teraz</button>
+  <button id="isoBtn" onclick="toggleIsolate()">Odpojiť uzol (simulácia)</button>
+  <button id="autoBtn" onclick="toggleAuto()">Auto-sync</button>
+  <a href="/docs" class="muted">API docs</a>
+</header>
+<main>
+  <section class="card">
+    <h2>Stav klastra <span class="muted" style="font-weight:400">(pohľad z tohto uzla, obnova každé 2 s)</span></h2>
+    <table>
+      <thead><tr><th>Uzol</th><th>Stav</th><th>Záznamy (živé / zmazané)</th><th>Operácie</th><th>Vektor verzií</th>
+        <th>Outbox (neodoslané)</th><th>Konflikty</th><th>Kontrolný súčet manifestu</th></tr></thead>
+      <tbody id="cluster"></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Záznamy na tomto uzle</h2>
+    <form onsubmit="createItem(event)">
+      <input id="name" placeholder="Názov" required maxlength="200">
+      <input id="content" placeholder="Obsah" style="flex:1; min-width:200px">
+      <button class="primary">Vytvoriť</button>
+      <label class="muted"><input type="checkbox" id="showDeleted" onchange="refresh()"> zobraziť zmazané</label>
+    </form>
+    <table>
+      <thead><tr><th>ID</th><th>Názov</th><th>Obsah</th><th>Pôvod</th><th>Verzia</th><th>Lamport / uzol</th><th>Kontrolný súčet</th><th></th></tr></thead>
+      <tbody id="items"></tbody>
+    </table>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Posledné operácie</h2>
+      <table><thead><tr><th>Zdroj#seq</th><th>Akcia</th><th>Záznam</th><th>Lamport</th><th>Výsledok</th></tr></thead>
+      <tbody id="ops"></tbody></table>
+    </section>
+    <section class="card">
+      <h2>Konflikty (Last-Writer-Wins)</h2>
+      <table><thead><tr><th>Záznam</th><th>Lokálne</th><th>Vzdialené</th><th>Víťaz</th></tr></thead>
+      <tbody id="conflicts"></tbody></table>
+      <h2 style="margin-top:16px">Výsledok poslednej akcie</h2>
+      <pre id="msg" class="muted">—</pre>
+    </section>
+  </div>
+</main>
+<script>
+let state = {};
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const short = s => s ? esc(s).slice(0, 8) : "";
+const pill = (ok, yes, no) => `<span class="pill ${ok ? "ok" : "bad"}">${ok ? yes : no}</span>`;
+const show = obj => document.getElementById("msg").textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: {"Content-Type": "application/json"}, body: body ? JSON.stringify(body) : undefined });
+  let data; try { data = await r.json(); } catch { data = await r.text(); }
+  return { status: r.status, data };
+}
+
+async function refresh() {
+  try {
+    const [cl, items, ops, conf] = await Promise.all([
+      api("GET", "/api/cluster"), api("GET", "/api/items?include_deleted=" + document.getElementById("showDeleted").checked),
+      api("GET", "/api/operations?limit=15"), api("GET", "/api/conflicts")]);
+    const self = cl.data.nodes.find(n => n.node_id === cl.data.viewed_from);
+    state = self;
+    document.getElementById("node").textContent = self.node_id;
+    document.title = "Uzol " + self.node_id + " – stavový panel";
+    const ns = document.getElementById("nodeStatus");
+    ns.className = "pill " + (self.status === "online" ? "ok" : "warn"); ns.textContent = self.status === "online" ? "online" : "izolovaný";
+    const cs = document.getElementById("consistency");
+    cs.className = "pill " + (cl.data.consistent ? "ok" : "warn");
+    cs.textContent = cl.data.consistent ? "všetky uzly konzistentné" : (cl.data.all_reachable ? "čaká sa na synchronizáciu" : "niektorý uzol nedostupný");
+    document.getElementById("isoBtn").textContent = self.status === "isolated" ? "Pripojiť uzol späť" : "Odpojiť uzol (simulácia)";
+    document.getElementById("autoBtn").textContent = "Auto-sync: " + (self.auto_sync ? "zap." : "vyp.");
+
+    document.getElementById("cluster").innerHTML = cl.data.nodes.map(n => n.reachable ? `<tr>
+      <td><b>${esc(n.node_id)}</b>${n.node_id === self.node_id ? ' <span class="muted">(tento)</span>' : ""}</td>
+      <td>${n.status === "online" ? pill(true, "online") : '<span class="pill warn">izolovaný</span>'}</td>
+      <td>${n.items_live} / ${n.items_deleted}</td><td>${n.operations}</td>
+      <td class="mono">${esc(JSON.stringify(n.version_vector))}</td>
+      <td>${n.outbox_pending ? `<span class="pill warn">${n.outbox_pending}</span> <span class="mono muted">${esc(JSON.stringify(n.outbox_pending_by_peer))}</span>` : "0"}</td>
+      <td>${n.conflicts}</td><td class="mono">${short(n.manifest_checksum)}…</td></tr>`
+      : `<tr><td><b>${esc(n.node_id)}</b></td><td>${pill(false, "", "nedostupný")}</td><td colspan="6" class="muted mono">${esc(n.error)}</td></tr>`).join("");
+
+    document.getElementById("items").innerHTML = items.data.map(i => `<tr style="${i.deleted ? "opacity:.5;text-decoration:line-through" : ""}">
+      <td class="mono" title="${esc(i.id)}">${short(i.id)}</td><td>${esc(i.name)}</td><td>${esc(i.content)}</td>
+      <td>${esc(i.origin_node)}</td><td>v${i.version}</td><td class="mono">${i.lamport} / ${esc(i.updated_by)}</td>
+      <td class="mono" title="${esc(i.checksum)}">${short(i.checksum)}</td>
+      <td>${i.deleted ? "" : `<button onclick="editItem('${i.id}', ${i.version})">Upraviť</button> <button onclick="deleteItem('${i.id}')">Zmazať</button>`}</td></tr>`).join("")
+      || '<tr><td colspan="8" class="muted">Žiadne záznamy</td></tr>';
+
+    document.getElementById("ops").innerHTML = ops.data.map(o => `<tr><td class="mono">${esc(o.origin_node)}#${o.seq}</td>
+      <td>${esc(o.action)}</td><td>${esc(o.name)} <span class="mono muted">${short(o.item_id)}</span></td><td>${o.lamport}</td>
+      <td>${o.result === "applied" ? "aplikovaná" : '<span class="pill warn">prekonaná</span>'}</td></tr>`).join("")
+      || '<tr><td colspan="5" class="muted">—</td></tr>';
+
+    document.getElementById("conflicts").innerHTML = conf.data.map(c => `<tr><td class="mono">${short(c.item_id)}</td>
+      <td>v${c.local_version} (L${c.local_lamport}/${esc(c.local_node)})</td><td>v${c.remote_version} (L${c.remote_lamport}/${esc(c.remote_node)})</td>
+      <td>${c.winner === "remote" ? "vzdialená" : "lokálna"}</td></tr>`).join("") || '<tr><td colspan="4" class="muted">Žiadne konflikty</td></tr>';
+  } catch (e) { show("Chyba obnovy: " + e); }
+}
+
+async function createItem(ev) {
+  ev.preventDefault();
+  const r = await api("POST", "/api/items", { name: document.getElementById("name").value, content: document.getElementById("content").value });
+  show(r); document.getElementById("name").value = ""; document.getElementById("content").value = ""; refresh();
+}
+async function editItem(id, version) {
+  const content = prompt("Nový obsah záznamu:"); if (content === null) return;
+  show(await api("PUT", "/api/items/" + id, { content, expected_version: version })); refresh();
+}
+async function deleteItem(id) { show(await api("DELETE", "/api/items/" + id)); refresh(); }
+async function doSync() { show("Synchronizujem…"); const r = await api("POST", "/api/sync"); show(r); refresh(); }
+async function toggleIsolate() { show(await api("POST", "/api/admin/isolate", { enabled: state.status !== "isolated" })); refresh(); }
+async function toggleAuto() { show(await api("POST", "/api/admin/autosync", { enabled: !state.auto_sync })); refresh(); }
+
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
