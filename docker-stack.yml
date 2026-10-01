@@ -1,0 +1,97 @@
+# Nasadenie na 3 Docker hostiteľov (3 VM) v režime Docker Swarm s overlay sieťou.
+#
+# Príprava (raz):
+#   vm1$ docker swarm init --advertise-addr <IP_VM1>
+#   vm2$ docker swarm join --token <TOKEN> <IP_VM1>:2377
+#   vm3$ docker swarm join --token <TOKEN> <IP_VM1>:2377
+#   vm1$ docker node update --label-add dtnode=a <vm1-hostname>
+#   vm1$ docker node update --label-add dtnode=b <vm2-hostname>
+#   vm1$ docker node update --label-add dtnode=c <vm3-hostname>
+#   každý VM: docker build -t dt-node:latest ./app     (alebo použiť registry, viď README)
+#
+# Nasadenie:  vm1$ docker stack deploy -c docker-stack.yml dt
+# Stav:       vm1$ docker stack ps dt
+#
+# Každý uzol (API + DB + volume) beží na vlastnom VM vďaka placement constraints.
+# Uzly komunikujú cez šifrovanú overlay sieť dt_cluster.
+
+x-api: &api
+  image: ${DT_IMAGE:-dt-node:latest}
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 20s
+
+x-api-env: &api-env
+  POSTGRES_USER: ${POSTGRES_USER:-admin}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
+  POSTGRES_DB: ${POSTGRES_DB:-node_db}
+  CLUSTER_TOKEN: ${CLUSTER_TOKEN:-dev-cluster-token}
+
+x-db: &db
+  image: postgres:15-alpine
+  environment:
+    POSTGRES_USER: ${POSTGRES_USER:-admin}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secretpassword}
+    POSTGRES_DB: ${POSTGRES_DB:-node_db}
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+
+x-restart: &restart
+  restart_policy: { condition: any, delay: 5s }
+
+services:
+  db-a:
+    <<: *db
+    volumes: [db_a_data:/var/lib/postgresql/data]
+    networks: [node_a]
+    deploy: { <<: *restart, placement: { constraints: [node.labels.dtnode == a] } }
+  api-a:
+    <<: *api
+    environment: { <<: *api-env, NODE_ID: A, DB_HOST: db-a, PEERS: "B=http://api-b:8000,C=http://api-c:8000" }
+    ports: [{ target: 8000, published: 8001, mode: host }]
+    networks: [node_a, cluster]
+    deploy: { <<: *restart, placement: { constraints: [node.labels.dtnode == a] } }
+
+  db-b:
+    <<: *db
+    volumes: [db_b_data:/var/lib/postgresql/data]
+    networks: [node_b]
+    deploy: { <<: *restart, placement: { constraints: [node.labels.dtnode == b] } }
+  api-b:
+    <<: *api
+    environment: { <<: *api-env, NODE_ID: B, DB_HOST: db-b, PEERS: "A=http://api-a:8000,C=http://api-c:8000" }
+    ports: [{ target: 8000, published: 8002, mode: host }]
+    networks: [node_b, cluster]
+    deploy: { <<: *restart, placement: { constraints: [node.labels.dtnode == b] } }
+
+  db-c:
+    <<: *db
+    volumes: [db_c_data:/var/lib/postgresql/data]
+    networks: [node_c]
+    deploy: { <<: *restart, placement: { constraints: [node.labels.dtnode == c] } }
+  api-c:
+    <<: *api
+    environment: { <<: *api-env, NODE_ID: C, DB_HOST: db-c, PEERS: "A=http://api-a:8000,B=http://api-b:8000" }
+    ports: [{ target: 8000, published: 8003, mode: host }]
+    networks: [node_c, cluster]
+    deploy: { <<: *restart, placement: { constraints: [node.labels.dtnode == c] } }
+
+networks:
+  cluster:
+    driver: overlay
+    attachable: true
+    driver_opts: { encrypted: "true" }
+  node_a: { driver: overlay }
+  node_b: { driver: overlay }
+  node_c: { driver: overlay }
+
+volumes:
+  db_a_data:
+  db_b_data:
+  db_c_data:
