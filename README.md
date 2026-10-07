@@ -64,7 +64,8 @@ flowchart LR
 | `docker-stack.yml` | 3 uzly na 3 hostiteľoch (Swarm + overlay sieť) |
 | `scripts/demo_scenario.py` | automatizovaný scenár obhajoby |
 | `scripts/deploy.ps1`, `deploy.sh` | automatické nasadenie |
-| `scripts/partition.ps1`, `partition.sh` | odpojenie / pripojenie uzla od siete |
+| `scripts/partition.ps1`, `partition.sh` | odpojenie / pripojenie uzla od siete (Docker Compose) |
+| `scripts/swarm-partition.sh` | reálne odpojenie uzla na VM v Swarm klastri (iptables) |
 | `tests/` | unit a API testy (pytest) |
 | `.github/workflows/ci.yml` | CI: testy + celý scenár obhajoby nad reálnymi kontajnermi |
 
@@ -253,8 +254,20 @@ docker stack ps dt
 
 Placement constraints zabezpečia, že API aj DB uzla X bežia na hostiteľovi s labelom `dtnode=x`
 a volume je lokálny na tom hostiteľovi. Panely sú na `http://<IP_VMx>:800x`.
-Odpojenie uzla: odpojenie sieťovej karty VM v hypervízore (napr. VirtualBox – „Cable connected“)
-alebo `sudo iptables -A INPUT -p udp --dport 4789 -j DROP` (VXLAN overlay) na VM2; obnovenie opačne.
+**Odpojenie uzla (reálny výpadok siete):** na VM2 (uzol B) sa spustí skript, ktorý cez iptables
+zahodí všetku komunikáciu s VM1 a VM3 (vrátane Swarm overlay siete). Prístup z hostiteľa do
+stavového panela B zostáva, takže je vidieť, že B počas výpadku pracuje lokálne.
+
+```bash
+./scripts/swarm-partition.sh odpoj <IP VM1> <IP VM3>   # odpojenie (IP sa zapamätajú)
+./scripts/swarm-partition.sh stav                       # aktuálny stav
+./scripts/swarm-partition.sh pripoj                     # obnovenie spojenia
+```
+
+Počas odpojenia `docker node ls` na VM1 ukazuje `dt-vm2` ako `Down`, panel uzla A zobrazí B ako
+nedostupný a ručná synchronizácia na B bezpečne zlyhá (HTTP 503). Po `pripoj` sa uzol vráti do stavu
+`Ready` a neodoslané operácie sa automaticky zosynchronizujú. Alternatívne možno v hypervízore
+odpojiť sieťovú kartu VM (vtedy však nie je dostupný ani panel uzla B).
 Porty potrebné medzi VM: 2377/tcp, 7946/tcp+udp, 4789/udp (a ESP pri šifrovanej sieti).
 
 ## 8. Health checks, logovanie, monitoring
